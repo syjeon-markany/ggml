@@ -3040,3 +3040,115 @@ GGML_CALL int ggml_backend_cuda_reg_devices() {
     }
     return device_count;
 }
+
+__global__ void scale_output_kernel(float* data, int64_t nelements) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < nelements) {
+        float val = data[idx];
+        data[idx] = (val + 1.0f) * 0.5f;
+    }
+}
+
+void ggml_tensor_scale_output_gpu(struct ggml_tensor* src) {
+    int64_t nelements = ggml_nelements(src);
+    float* data       = (float*)src->data;
+
+    // CUDA 커널 런치 설정
+    int threadsPerBlock = 256;
+    int blocksPerGrid = (nelements + threadsPerBlock - 1) / threadsPerBlock;
+
+    // CUDA 커널 호출
+    scale_output_kernel<<<blocksPerGrid, threadsPerBlock>>>(data, nelements);
+
+    // CUDA 커널 실행 후 에러 체크
+    cudaError_t err = cudaGetLastError();
+    if (err != cudaSuccess) {
+        printf("CUDA Error: %s\n", cudaGetErrorString(err));
+    }
+
+    // 커널이 완료될 때까지 동기화
+    cudaDeviceSynchronize();
+}
+
+__global__ void clamp_kernel(float* data, int64_t nelements, float min, float max) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < nelements) {
+        float val = data[idx];
+        data[idx] = val < min ? min : (val > max ? max : val);
+    }
+}
+
+// CUDA에서 동작하는 ggml_tensor_clamp 함수
+void ggml_tensor_clamp_gpu(struct ggml_tensor* src, float min, float max) {
+    int64_t nelements = ggml_nelements(src);
+    float* data       = (float*)src->data;
+
+    // CUDA 커널 런치 설정
+    int threadsPerBlock = 256;
+    int blocksPerGrid = (nelements + threadsPerBlock - 1) / threadsPerBlock;
+
+    // CUDA 커널 호출
+    clamp_kernel<<<blocksPerGrid, threadsPerBlock>>>(data, nelements, min, max);
+
+    // CUDA 커널 실행 후 에러 체크
+    cudaError_t err = cudaGetLastError();
+    if (err != cudaSuccess) {
+        printf("CUDA Error: %s\n", cudaGetErrorString(err));
+    }
+
+    // 커널이 완료될 때까지 동기화
+    cudaDeviceSynchronize();
+}
+
+__global__ void tensor_to_image_kernel(float* input, uint8_t* output, int64_t width, int64_t height, int64_t channels) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int total_elements = width * height * channels;
+
+    if (idx < total_elements) {
+        int pixel_idx = idx / channels;
+        int color_idx = idx % channels;
+        
+        int ix = pixel_idx % width;
+        int iy = (pixel_idx / width) % height;
+
+        // Planar 형식의 데이터에서 RGB 값을 올바르게 읽어오기
+        float value = input[color_idx * width * height + iy * width + ix];
+        output[iy * width * channels + ix * channels + color_idx] = (uint8_t)(value * 255.0f);
+    }
+}
+
+// CUDA에서 동작하는 sd_tensor_to_image 함수
+uint8_t* sd_tensor_to_image_gpu(struct ggml_tensor* input) {
+    int64_t width    = input->ne[0];
+    int64_t height   = input->ne[1];
+    int64_t channels = input->ne[2];
+
+    int64_t total_elements = width * height * channels;
+
+    // GPU 메모리에 입력 및 출력 데이터 할당
+    float* gpu_input = (float*)input->data;
+    uint8_t* gpu_output;
+
+    cudaMalloc(&gpu_output, total_elements * sizeof(uint8_t));
+
+
+    // CUDA 커널 런치 설정
+    int threadsPerBlock = 256;
+    int blocksPerGrid = (total_elements + threadsPerBlock - 1) / threadsPerBlock;
+
+    // CUDA 커널 호출
+    tensor_to_image_kernel<<<blocksPerGrid, threadsPerBlock>>>(gpu_input, gpu_output, width, height, channels);
+
+    // CUDA 커널 실행 후 에러 체크
+    cudaError_t err = cudaGetLastError();
+    if (err != cudaSuccess) {
+        printf("CUDA Error: %s\n", cudaGetErrorString(err));
+    }
+    cudaDeviceSynchronize();
+
+
+    // GPU 메모리 해제
+    cudaFree(gpu_input);
+
+    return gpu_output;
+}
