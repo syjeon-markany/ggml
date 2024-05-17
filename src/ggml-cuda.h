@@ -50,3 +50,7 @@ GGML_API GGML_CALL void ggml_backend_cuda_get_device_memory(int device, size_t *
 #ifdef  __cplusplus
 }
 #endif
+
+void ggml_tensor_scale_output_gpu(struct ggml_tensor* src);
+void ggml_tensor_clamp_gpu(struct ggml_tensor* src, float min, float max);
+uint8_t* sd_tensor_to_image_gpu(struct ggml_tensor* input);
